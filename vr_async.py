@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 
 # decord uses up all the RAM otherwise
@@ -20,6 +22,9 @@ mp_ctx = multiprocessing.get_context("spawn")
 
 
 class AsyncVideoReader:
+    def __array__(self) -> AsyncVideoReader:
+        return self
+
     def __init__(self, path: str | Path, **kwargs):
         self._path = Path(path)
         self._kwargs = kwargs
@@ -51,7 +56,7 @@ class AsyncVideoReader:
                 path=self._path,
                 kwargs=self._kwargs,
                 shm_name=self._shm.name,
-                frame_shape=frame0.shape,
+                frame_shape=(1, *frame0.shape),
                 dtype=str(self._dtype),
                 request_queue=self._request_queue,
                 response_queue=self._response_queue,
@@ -63,7 +68,7 @@ class AsyncVideoReader:
         self._listener = threading.Thread(target=self._listen, daemon=True)
         self._listener.start()
 
-        self._result = np.ndarray(frame0.shape, dtype=self.dtype, buffer=self._shm.buf)
+        self._result = np.ndarray((1, *frame0.shape), dtype=self.dtype, buffer=self._shm.buf)
 
     def _listen(self):
         while True:
@@ -88,21 +93,24 @@ class AsyncVideoReader:
 
             future.set_result(self._result)
 
-    def __getitem__(self, index: int) -> Future:
+    def __getitem__(self, index) -> Future:
         with self._lock:
             # if a new frame has been requested before the previous frame finished decoding
             # TODO: make this toggleable, use this only when the slider is moving around
             #  else if the user has clicked the "play" or "step" button we want to render EVERY frame!!!!
             if self._pending_future is not None and not self._pending_future.done():
                 self._pending_future.cancel()
+                print("cancelled")
                 # tell it to stop decoding/copying the current frame and start the next frame
                 os.kill(self._worker.pid, signal.SIGUSR1)
 
             self._pending_rid += 1
+            # a trick to get the resultant shape of the sliced array with a zero-memory dummy array
+            final_shape = np.empty(shape=self.shape, dtype="V0")[index[0]].shape
             future = Future()
             self._pending_future = future
 
-        self._request_queue.put((self._pending_rid, index))
+        self._request_queue.put((self._pending_rid, index[0]))
         return future
 
     def shutdown(self, wait: bool = True):
@@ -129,10 +137,7 @@ class AsyncVideoReader:
 
 if __name__ == "__main__":
     import fastplotlib as fpl
-    from fastplotlib.ui import EdgeWindow
-    from functools import partial
-    from imgui_bundle import imgui
-    from time import perf_counter
+    import pyinstrument
 
     INDEX = 0
     INDEX_VIEW = 0
@@ -143,70 +148,24 @@ if __name__ == "__main__":
     for p in paths:
         vrs.append(AsyncVideoReader(p))
 
-    fig = fpl.Figure(shape=(2, 2), size=(1000, 1000))
+    ref_ranges = {"t": (0, vrs[0].shape[0], 1)}
+    ndw = fpl.NDWidget(ref_ranges=ref_ranges, shape=(1, 4), size=(1800, 500))
+    for i, vr in enumerate(vrs):
+        ndw[0, i].add_nd_image(vr, dims=list("tmnc"), spatial_dims=list("mnc"), rgb_dim="c", compute_histogram=False)
 
-    images = list()
-    for subplot, vr in zip(fig, vrs):
-        f = vr[0]
-        data = f.result(5)
-        images.append(subplot.add_image(data[::2, ::2]))
+    ndw.show()
 
-    def update_index(i):
-        global images
-        global INDEX_VIEW
-        INDEX_VIEW = i
+    run_profile = False
 
-        futures = list()
-        for vr, g in zip(vrs, images):
-            future = vr[i]
-            future.add_done_callback(partial(_update_graphic, g))
-            futures.append(future)
+    if run_profile:
+        ndw.indices["t"] = 5000
+        ndw._sliders_ui._playing["t"] = True
 
-        while all([f.running() for f in futures]):
-            pass
+        with pyinstrument.Profiler(async_mode="enabled") as profiler:
+            fpl.loop.run()
 
-    def _update_graphic(g, fut: Future):
-        if fut.cancelled():
-            return
-        data = fut.result()
-        g.data = data[::2, ::2]
+        profiler.print()
+        profiler.open_in_browser()
 
-    class ImageProcessingWindow(EdgeWindow):
-        def __init__(self, figure, size, location, title):
-            super().__init__(figure=figure, size=size, location=location, title=title)
-            self._last_update = 0
-            self._playing = False
-
-        def update(self):
-            global INDEX
-            if not self._playing:
-                if imgui.button("play"):
-                    self._playing = True
-            else:
-                if imgui.button("pause"):
-                    self._playing = False
-
-            if self._playing:
-                if perf_counter() - self._last_update > (1 / 50):
-                    INDEX += 1
-                    update_index(INDEX)
-                    self._last_update = perf_counter()
-
-            changed, value = imgui.slider_int(label="sigma", v=INDEX, v_min=0, v_max=vrs[0].shape[0])
-            if changed:
-                if perf_counter() - self._last_update > 0.1:
-                    update_index(value)
-                    self._last_update = perf_counter()
-                INDEX = value
-
-            elif perf_counter() - self._last_update > 0.5:
-                if INDEX_VIEW != INDEX:
-                    update_index(INDEX)
-
-    gui = ImageProcessingWindow(fig, size=200, location="bottom", title="bah")
-
-    fig.add_gui(gui)
-
-
-    fig.show()
-    fpl.loop.run()
+    else:
+        fpl.loop.run()
