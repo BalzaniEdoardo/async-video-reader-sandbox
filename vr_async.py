@@ -138,10 +138,6 @@ class AsyncVideoReader:
 if __name__ == "__main__":
     import fastplotlib as fpl
     import pyinstrument
-
-    INDEX = 0
-    INDEX_VIEW = 0
-
     paths = sorted(Path("/home/kushal/data/gerbils/").glob("*.mp4"))
 
     vrs = list()
