@@ -35,8 +35,8 @@ def _reader_process(path: Path, kwargs: dict, shm_name: str, frame_shape: tuple,
     #     "LD_PRELOAD"
     # ] = "/usr/lib/x86_64-linux-gnu/libcuda.so:/usr/lib/x86_64-linux-gnu/libnvcuvid.so:$LD_PRELOAD"
 
-    vr = VideoReader(str(path), num_threads=1, ctx=gpu(0))
-    vr[10].asnumpy()
+    vr = VideoReader(str(path), ctx=gpu(0))
+    vr[slice(0, 1)].asnumpy()
     vr.seek(0)
     dtype = np.dtype(dtype)
 
