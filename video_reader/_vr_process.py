@@ -1,89 +1,90 @@
 import os
+import queue
 
 # decord uses up all the RAM otherwise
 os.environ["DECORD_EOF_RETRY_MAX"] = "128"
-# os.environ["LD_PRELOAD"] = "/usr/lib/x86_64-linux-gnu/libcuda.so:/usr/lib/x86_64-linux-gnu/libnvcuvid.so:$LD_PRELOAD"
 
-import multiprocessing
-from multiprocessing import Queue
+from multiprocessing import Queue, Event, Lock
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
-import signal
 
 import numpy as np
 
-mp_ctx = multiprocessing.get_context("spawn")
 
-interrupt = False
-
-def _handle_sigusr1(signum, frame):
-    global interrupt
-    interrupt = True
-
-# https://docs.python.org/3/library/signal.html#general-rules
-# handles interrupt from main process
-signal.signal(signal.SIGUSR1, _handle_sigusr1)
-
-
-def _reader_process(path: Path, kwargs: dict, shm_name: str, frame_shape: tuple,
-                    dtype: str, request_queue: Queue, response_queue: Queue):
+def _reader_process(
+    path: Path,
+    kwargs: dict,
+    shm_name: str,
+    frame_shape: tuple,
+    dtype: str,
+    request_queue: Queue,
+    response_queue: Queue,
+    stop_event: Event,
+    cancel_event: Event,
+    buffer_lock: Lock,
+):
     import os
     from . import config
-    if config.backend == "decord":
 
-        from decord import VideoReader, gpu, cpu
+    if config.backend == "decord":
+        from decord import VideoReader, gpu
 
         os.environ["DECORD_EOF_RETRY_MAX"] = "128"
-        # os.environ[
-        #     "LD_PRELOAD"
-        # ] = "/usr/lib/x86_64-linux-gnu/libcuda.so:/usr/lib/x86_64-linux-gnu/libnvcuvid.so:$LD_PRELOAD"
-
         vr = VideoReader(str(path), ctx=gpu(0))
-        vr[slice(0, 1)].asnumpy()
+        as_numpy = lambda frame: frame.asnumpy()
+        as_numpy(vr[slice(0, 1)])
         vr.seek(0)
     else:
         from ._pyav_video_reader import VideoHandler
 
+        as_numpy = lambda frame: frame
         vr = VideoHandler(path)
 
     dtype = np.dtype(dtype)
-
     shm = SharedMemory(name=shm_name)
     buf = np.ndarray(frame_shape, dtype=dtype, buffer=shm.buf)
 
-    global interrupt
+    try:
+        while not stop_event.is_set():
+            try:
+                request = request_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
 
-    while True:
-        request = request_queue.get(block=True)
-        if request is None:
-            break
+            if request is None:
+                break
 
-        # if the interrupt signal is received it will decode the next frame and skip this one
-        if interrupt:
-            interrupt = False
-            continue
+            if cancel_event.is_set():
+                cancel_event.clear()
+                continue
 
-        rid, index = request
-        frame = vr[index].asnumpy()
+            rid, index = request
+            frame = as_numpy(vr[index])
 
-        # if the interrupt signal is received it will skip the copy step to save some time
-        # this allows it to start decoding the next frame sooner
-        if interrupt:
-            interrupt = False
-            continue
+            if cancel_event.is_set():
+                cancel_event.clear()
+                continue
 
-        if frame.shape != buf.shape or frame.dtype != dtype:
+            if frame.shape != buf.shape or frame.dtype != dtype:
+                shm.close()
+                shm = SharedMemory(create=True, size=frame.nbytes)
+                buf = np.ndarray(frame.shape, dtype=frame.dtype, buffer=shm.buf)
+                dtype = frame.dtype
+
+            if cancel_event.is_set():
+                cancel_event.clear()
+                continue
+
+            with buffer_lock:
+                np.copyto(buf, frame)
+                response_queue.put((rid, frame.shape, str(frame.dtype), shm.name))
+    finally:
+        try:
+            if hasattr(vr, "close"):
+                vr.close()
+        except Exception as e:
+            print(f"[_reader_process] Failed to close video reader: {e}")
+        try:
             shm.close()
-            shm = SharedMemory(create=True, size=frame.nbytes)
-            buf = np.ndarray(frame.shape, dtype=frame.dtype, buffer=shm.buf)
-            dtype = frame.dtype
-
-        # if the interrupt signal is received it will decode the next frame and skip this one
-        if interrupt:
-            interrupt = False
-            continue
-
-        np.copyto(buf, frame)
-        response_queue.put((rid, frame.shape, str(frame.dtype), shm.name))
-
-    shm.close()
+        except Exception:
+            pass
