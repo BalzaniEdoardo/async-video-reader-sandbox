@@ -12,6 +12,8 @@ from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 import threading
 
+import sys
+
 import numpy as np
 
 try:
@@ -23,7 +25,13 @@ from ._pyav_video_reader import VideoHandler
 from .config import config
 from ._vr_process import _reader_process
 
-mp_ctx = multiprocessing.get_context("spawn")
+# fork clones the parent process directly — no re-import of the main script,
+# so AsyncVideoReader can be instantiated at module level (e.g. in scripts or
+# IPython) without hitting the spawn bootstrap trap. Windows only has spawn.
+if sys.platform == "win32":
+    mp_ctx = multiprocessing.get_context("spawn")
+else:
+    mp_ctx = multiprocessing.get_context("fork")
 
 
 class AsyncVideoReader:
@@ -44,6 +52,8 @@ class AsyncVideoReader:
 
         self._shape = (len(vr), *frame0.shape)
         self._dtype = np.dtype(frame0.dtype)
+        if hasattr(vr, "close"):
+            vr.close()
         del vr
 
         self._shm = SharedMemory(create=True, size=frame0.nbytes)
