@@ -154,7 +154,7 @@ class VideoHandler(BaseAudioVideo):
         video_path: str | pathlib.Path,
         stream_index: int = 0,
         time: Optional[NDArray] = None,
-        return_frame_array: bool = False,
+        return_frame_array: bool = True,
     ) -> None:
         super().__init__(video_path)
         self.stream = self.container.streams.video[stream_index]

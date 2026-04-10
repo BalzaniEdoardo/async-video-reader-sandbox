@@ -20,7 +20,8 @@ try:
 except ImportError:
     VideoReader = None
 
-from . import VideoHandler, av
+from ._pyav_video_reader import VideoHandler
+from .config import config
 
 from _vr_process import _reader_process
 
@@ -35,13 +36,15 @@ class AsyncVideoReader:
         self._path = Path(path)
         self._kwargs = kwargs
 
-        vr = VideoReader(str(self._path), num_threads=1)
-        try:
+        if config.backend == "decord":
+            vr = VideoReader(str(self._path), num_threads=1)
             frame0 = vr[10].asnumpy()
             vr.seek(0)
-        except IndexError:
-            frame0 = vr[0].asnumpy()
+        else:
+            vr = VideoHandler(self._path)
+            frame0 = vr[0]
             vr.seek(0)
+
 
         self._shape = (len(vr), *frame0.shape)
         self._dtype = np.dtype(frame0.dtype)
@@ -144,7 +147,16 @@ class AsyncVideoReader:
 if __name__ == "__main__":
     import fastplotlib as fpl
     import pyinstrument
-    paths = sorted(Path("/home/kushal/data/gerbils/").glob("*.mp4"))
+
+    path_videos = Path("/home/kushal/data/gerbils/")
+    if not path_videos.exists():
+        path_videos = Path("/Users/ebalzani/Code/pynaviz/tests/test_video")
+        paths = [
+            p for ext in ["avi", "mkv", "mp4"] for p in path_videos.glob("*.{}".format(ext))
+        ]
+    else:
+        paths = sorted(path_videos.glob("*.mp4"))
+
 
     vrs = list()
     for p in paths:
