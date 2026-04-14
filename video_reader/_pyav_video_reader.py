@@ -12,10 +12,10 @@ import time
 import warnings
 from contextlib import contextmanager
 from typing import Callable, List, Literal, Optional, Tuple
-try:
-    import av
-except ImportError:
-    av = None
+import av
+
+from av.codec.hwaccel import HWAccel
+# gpu = HWAccel(device_type="none")
 
 import numpy as np
 
@@ -33,7 +33,7 @@ class BaseAudioVideo:
     ) -> None:
         self._thread_local.get_from_index = False
         self.file_path = pathlib.Path(path)
-        self.container = av.open(path)
+        self.container = av.open(path)#, hwaccel=gpu)
         self._running = True
 
         # initialize index for last decoded frame
@@ -134,7 +134,6 @@ class VideoHandler(BaseAudioVideo):
 
     Examples
     --------
-    >>> from pynaviz.audiovideo import VideoHandler
     >>> vh = VideoHandler("example.mp4")  # doctest: +SKIP
     >>> # Get the frame at 1.5 seconds.
     >>> frame = vh.get(1.5)  # doctest: +SKIP
@@ -159,6 +158,7 @@ class VideoHandler(BaseAudioVideo):
     ) -> None:
         super().__init__(video_path)
         self.stream = self.container.streams.video[stream_index]
+        self.stream.thread_type = "AUTO"
         self.stream_index = stream_index
         self.pixel_format = pixel_format
 
@@ -811,7 +811,7 @@ class VideoHandler(BaseAudioVideo):
 
     def __getitem__(
         self,
-        idx: int | slice | Tuple[int | slice, *Tuple[slice, ...]],
+        idx: int | slice | Tuple[int | slice, Tuple[slice, ...]],
     ) -> NDArray | av.VideoFrame | List[av.VideoFrame]:
         """
         Get item for video frame.
